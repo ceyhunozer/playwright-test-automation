@@ -1,0 +1,13 @@
+node_modules/
+/test-results/
+/playwright-report/
+/blob-report/
+/playwright/.cache/
+.env
+*.log
+.DS_Store
+allure-results/
+allure-report/
+coverage/
+.env.local
+.env.*.local

@@ -1,0 +1,488 @@
+// filepath: c:\Users\ceyhu\playwright\tests\login.spec.ts
+import { test } from './utils/env-config';
+import { expect } from '@playwright/test';
+import { LoginPage } from './pages/login-page';
+import { TOTPUtil } from './utils/totp.util';
+import { allure } from 'allure-playwright';
+
+// Initialize TOTP configuration securely
+const TOTP_SECRET = 'GHBAMSEXL7DOEWCE';
+
+test.describe('Login Feature', () => {
+    let loginPage: LoginPage;
+
+    test.beforeEach(async ({ page, envConfig }) => {
+        // Validate environment configuration
+        if (!envConfig || !envConfig.credentials || !envConfig.credentials.username || !envConfig.credentials.password) {
+            throw new Error('Missing environment configuration or credentials');
+        }
+
+        // Validate and set TOTP secret
+        if (!TOTPUtil.validateSecret(TOTP_SECRET)) {
+            throw new Error('Invalid TOTP secret format');
+        }
+        TOTPUtil.setSecret(TOTP_SECRET);
+
+        // Initialize page and logging
+        loginPage = new LoginPage(page);
+        console.log(`Running login tests in ${envConfig.environment} environment`);
+        console.log(`Base URL: ${envConfig.baseURL}`);
+        console.log(`Using username: ${envConfig.credentials.username}`);
+        
+        try {
+            // Navigate to login page with retry
+            let retryCount = 0;
+            const maxRetries = 2;
+            let lastError = null;
+
+            while (retryCount <= maxRetries) {
+                try {
+                    console.log(`Login page navigation attempt ${retryCount + 1}/${maxRetries + 1}`);
+                    await loginPage.goto();
+                    await loginPage.verifyLoginPageLoaded();
+                    break;
+                } catch (error) {
+                    console.error(`Navigation attempt ${retryCount + 1} failed:`, error.message);
+                    lastError = error;
+                    if (retryCount === maxRetries) {
+                        throw new Error(`Failed to load login page after ${maxRetries + 1} attempts: ${error.message}`);
+                    }
+                    retryCount++;
+                    // Exponential backoff
+                    await page.waitForTimeout(Math.pow(2, retryCount) * 1000);
+                }
+            }
+        } catch (error) {
+            console.error('Test setup failed:', error);
+            await page.screenshot({ path: 'setup-failure.png', fullPage: true });
+            throw error;
+        }
+    });
+
+    test.afterEach(async () => {
+        // Clear sensitive data after each test
+        TOTPUtil.clearSecret();
+    });
+
+    test('Complete login flow with 2FA @smoke @critical', async ({ envConfig }) => {
+        allure.epic('Authentication');
+        allure.feature('Login');
+        allure.story('2FA Login');
+        allure.severity('critical');
+
+        // First try the quick login approach
+        console.log('Testing quick login flow...');
+        await loginPage.loginWithDynamicTOTP(
+            envConfig.credentials.username,
+            envConfig.credentials.password
+        );
+        await loginPage.verifyLoginSuccessful();
+    });
+
+    test('Password validation requirements @regression', async ({ page }) => {
+        allure.epic('Authentication');
+        allure.feature('Login');
+        allure.story('Password Validation');
+        allure.severity('normal');
+
+        console.log('Testing password validation requirements...');
+
+        const passwordScenarios = [
+            { password: '12345', expected: 'minimum length' },
+            { password: 'nouppercaseornumber', expected: 'uppercase letter' },
+            { password: 'NOLOWERCASEORNUMBER', expected: 'lowercase letter' },
+            { password: 'NoSpecialChar1', expected: 'special character' }
+        ];
+
+        for (const scenario of passwordScenarios) {
+            await loginPage.enterUsername('test@example.com');
+            await loginPage.clickContinue();
+            await loginPage.enterPassword(scenario.password);
+            const errorText = await page.getByTestId('password-error').textContent();
+            expect(errorText?.toLowerCase()).toContain(scenario.expected);
+            await page.getByTestId('back-to-login-button').click();
+            await page.waitForLoadState('networkidle');
+        }
+    });
+
+    test('Remember me functionality @regression', async ({ context, page }) => {
+        allure.epic('Authentication');
+        allure.feature('Login');
+        allure.story('Remember Me');
+        allure.severity('normal');
+
+        console.log('Testing remember me functionality...');
+
+        await loginPage.enterUsername('test@example.com');
+        await loginPage.clickContinue();
+        await loginPage.enterPassword('ValidP@ssw0rd');
+        await page.getByTestId('remember-me-checkbox').check();
+        await loginPage.clickContinue();
+
+        const cookies = await context.cookies();
+        const rememberMeCookie = cookies.find(cookie => cookie.name === 'remember_me');
+        expect(rememberMeCookie).toBeDefined();
+        expect(rememberMeCookie?.secure).toBe(true);
+        expect(rememberMeCookie?.httpOnly).toBe(true);
+
+        const newPage = await context.newPage();
+        await newPage.goto('/login');
+        await expect(newPage).not.toHaveURL(/.*\/login/);
+        await expect(newPage.getByTestId('user-profile')).toBeVisible();
+    });
+
+    test('Accessibility requirements @accessibility', async ({ page }) => {
+        allure.epic('Authentication');
+        allure.feature('Login');
+        allure.story('Accessibility');
+        allure.severity('normal');
+
+        console.log('Testing accessibility requirements...');
+
+        await expect(page.getByLabel('Username or email')).toBeVisible();
+        await expect(page.getByLabel('Password')).toBeVisible();
+        await expect(page.getByLabel('Remember me')).toBeVisible();
+
+        await page.keyboard.press('Tab');
+        const activeElement = await page.evaluate(() => document.activeElement?.getAttribute('data-testid'));
+        expect(activeElement).toBe('username-input');
+
+        const loginButton = page.getByTestId('login-btn-continue');
+        await expect(loginButton).toHaveCSS('background-color', /^rgb\(([0-9]+, ){2}[0-9]+\)$/);
+
+        await loginPage.enterUsername('');
+        await loginPage.clickContinue();
+        const errorMessage = page.getByTestId('username-error');
+        await expect(errorMessage).toBeVisible();
+        expect(await errorMessage.getAttribute('role')).toBe('alert');
+    });
+
+    test('Browser navigation handling @regression', async ({ page }) => {
+        allure.epic('Authentication');
+        allure.feature('Login');
+        allure.story('Browser Navigation');
+        allure.severity('normal');
+
+        console.log('Testing browser navigation handling...');
+
+        await loginPage.enterUsername('test@example.com');
+        await loginPage.clickContinue();
+        
+        await page.goBack();
+        await page.waitForLoadState('networkidle');
+        await expect(page.getByTestId('username-input')).toBeVisible();
+        await expect(page.getByTestId('password-input')).not.toBeVisible();
+
+        await page.goForward();
+        await page.waitForLoadState('networkidle');
+        await expect(page.getByTestId('password-input')).toBeVisible();
+
+        await page.reload();
+        await page.waitForLoadState('networkidle');
+        await expect(page.getByTestId('password-input')).toBeVisible();
+        await expect(page.getByTestId('username-input')).toHaveValue('test@example.com');
+    });
+
+    test('Step by step login process @regression', async ({ envConfig, page }) => {
+        allure.epic('Authentication');
+        allure.feature('Login');
+        allure.story('Step-by-Step Login');
+        allure.severity('normal');
+
+        console.log('Testing step-by-step login flow...');
+        
+        try {
+            // Step 1: Initial username entry
+            console.log('Step 1: Entering username...');
+            await loginPage.enterUsername(envConfig.credentials.username);
+            await page.waitForLoadState('networkidle');
+            await loginPage.clickContinue();
+            
+            // Step 2: Back to login (testing back button functionality)
+            console.log('Step 2: Testing back button...');
+            await Promise.all([
+                page.waitForLoadState('networkidle'),
+                loginPage.clickBackToLogin()
+            ]);
+            await loginPage.verifyLoginPageLoaded();
+            
+            // Step 3: Complete credentials
+            console.log('Step 3: Entering credentials...');
+            await loginPage.enterUsername(envConfig.credentials.username);
+            await loginPage.verifyPasswordInputVisible();
+            await loginPage.enterPassword(envConfig.credentials.password);
+            await Promise.all([
+                page.waitForLoadState('networkidle'),
+                loginPage.clickContinue()
+            ]);
+            
+            // Step 4: 2FA Authentication
+            console.log('Step 4: Handling 2FA...');
+            await loginPage.verify2FAInputVisible();
+            await loginPage.enter2FACode();
+            await Promise.all([
+                page.waitForLoadState('networkidle'),
+                loginPage.click2FALogin()
+            ]);
+            
+            // Step 5: Verify Success
+            console.log('Step 5: Verifying successful login...');
+            await Promise.all([
+                page.waitForLoadState('networkidle'),
+                loginPage.verifyLoginSuccessful()
+            ]);
+            
+            console.log('Login test completed successfully');
+            
+        } catch (error) {
+            console.error('Login test failed:', error.message);
+            await page.screenshot({ 
+                path: 'login-page-debug.png',
+                fullPage: true 
+            });
+            throw error;
+        }
+    });
+
+    test('Invalid credentials test @regression', async ({ page }) => {
+        allure.epic('Authentication');
+        allure.feature('Login');
+        allure.story('Invalid Login');
+        allure.severity('normal');
+
+        console.log('Testing invalid credentials flow...');
+        
+        try {
+            const invalidScenarios = [
+                { username: 'invalid@example.com', password: 'wrongpassword', description: 'completely invalid credentials' },
+                { username: '', password: 'anypassword', description: 'empty username' },
+                { username: 'invalid@format', password: 'anypassword', description: 'invalid email format' }
+            ];
+
+            for (const scenario of invalidScenarios) {
+                console.log(`Testing scenario: ${scenario.description}`);
+                
+                const currentUrl = page.url();
+                if (currentUrl.includes('loginfail')) {
+                    await page.getByTestId('back-to-login-button').click();
+                    await page.waitForLoadState('networkidle');
+                }
+
+                await loginPage.enterUsername(scenario.username);
+                await page.waitForLoadState('networkidle');
+                
+                if (scenario.username === '') {
+                    const errorText = await page.getByTestId('username-error').textContent();
+                    expect(errorText).toContain('required');
+                    continue;
+                }
+
+                await page.getByTestId('login-btn-continue').click();
+                await page.waitForLoadState('networkidle');
+
+                if (scenario.username === 'invalid@format') {
+                    const errorText = await page.getByTestId('username-error').textContent();
+                    expect(errorText).toContain('valid email');
+                    continue;
+                }
+
+                await loginPage.enterPassword(scenario.password);
+                await Promise.all([
+                    page.waitForLoadState('networkidle'),
+                    page.getByTestId('login-btn-continue').click()
+                ]);
+
+                await expect(page).toHaveURL(/.*\/loginfail/, { timeout: 10000 });
+                
+                await expect(async () => {
+                    const errorMessage = page.getByTestId('login-error-message');
+                    await expect(errorMessage).toBeVisible();
+                    const text = await errorMessage.textContent();
+                    expect(text?.toLowerCase()).toContain('login failed');
+                }).toPass({ timeout: 10000 });
+
+                const backButton = page.getByTestId('back-to-login-button');
+                await expect(backButton).toBeVisible();
+            }
+            
+        } catch (error) {
+            console.error('Invalid credentials test failed:', error.message);
+            await page.screenshot({ 
+                path: 'invalid-login-error.png',
+                fullPage: true 
+            });
+            throw error;
+        }
+    });
+
+    test('Rate limiting and account lockout @security', async ({ page }) => {
+        allure.epic('Authentication');
+        allure.feature('Login');
+        allure.story('Security Controls');
+        allure.severity('critical');
+
+        console.log('Testing rate limiting and account lockout...');
+        
+        try {
+            const maxAttempts = 5; // Adjust based on actual rate limit
+            let attemptCount = 0;
+            let isRateLimited = false;
+
+            while (attemptCount < maxAttempts && !isRateLimited) {
+                console.log(`Login attempt ${attemptCount + 1}/${maxAttempts}`);
+
+                const currentUrl = page.url();
+                if (currentUrl.includes('loginfail')) {
+                    await page.getByTestId('back-to-login-button').click();
+                    await page.waitForLoadState('networkidle');
+                }
+
+                await loginPage.enterUsername('test@example.com');
+                await page.waitForLoadState('networkidle');
+                await loginPage.clickContinue();
+                
+                if (await page.getByTestId('username-error').isVisible()) {
+                    continue;
+                }
+
+                await loginPage.enterPassword('wrongpassword');
+                await Promise.all([
+                    page.waitForLoadState('networkidle'),
+                    loginPage.clickContinue()
+                ]);
+
+                const errorSelectors = [
+                    'rate-limit-message',
+                    'account-locked-message',
+                    'too-many-attempts-message'
+                ];
+
+                for (const selector of errorSelectors) {
+                    const element = page.getByTestId(selector);
+                    if (await element.isVisible()) {
+                        console.log(`Rate limiting detected: ${await element.textContent()}`);
+                        isRateLimited = true;
+                        break;
+                    }
+                }
+
+                attemptCount++;
+
+                if (!isRateLimited && attemptCount < maxAttempts) {
+                    await page.waitForTimeout(1000);
+                }
+            }
+
+            if (!isRateLimited) {
+                console.warn('Rate limiting was not detected after maximum attempts');
+            }
+
+            const recoveryButton = page.getByRole('link', { name: /account recovery|reset password/i });
+            await expect(recoveryButton).toBeVisible();
+
+            await loginPage.enterUsername('test@example.com');
+            await loginPage.enterPassword('wrongpassword');
+            await Promise.all([
+                page.waitForLoadState('networkidle'),
+                loginPage.clickContinue()
+            ]);
+
+            await expect(
+                page.getByText(/rate limit|too many attempts|account locked/i)
+            ).toBeVisible();
+
+        } catch (error) {
+            console.error('Rate limiting test failed:', error.message);
+            await page.screenshot({ 
+                path: 'rate-limit-error.png',
+                fullPage: true 
+            });
+            throw error;
+        }
+    });
+
+    test('Session handling @security', async ({ browser, page, envConfig }) => {
+        allure.epic('Authentication');
+        allure.feature('Login');
+        allure.story('Session Management');
+        allure.severity('critical');
+
+        console.log('Testing session handling...');
+        
+        try {
+            await loginPage.loginWithDynamicTOTP(
+                envConfig.credentials.username,
+                envConfig.credentials.password
+            );
+            await loginPage.verifyLoginSuccessful();
+
+            console.log('Testing session persistence...');
+            const currentUrl = page.url();
+            await page.reload();
+            await page.waitForLoadState('networkidle');
+            await expect(page).toHaveURL(currentUrl);
+            await expect(page.getByTestId('login-form')).not.toBeVisible();
+
+            console.log('Testing session timeout handling...');
+            await page.route('**/api/**', async route => {
+                await route.fulfill({
+                    status: 401,
+                    body: JSON.stringify({ error: 'Session expired' })
+                });
+            });
+
+            await page.click('[data-testid="refresh-button"]');
+            await page.waitForLoadState('networkidle');
+            await expect(page).toHaveURL(/.*\/login/);
+            await expect(page.getByText(/session expired|login required/i)).toBeVisible();
+
+            await loginPage.loginWithDynamicTOTP(
+                envConfig.credentials.username,
+                envConfig.credentials.password
+            );
+            await loginPage.verifyLoginSuccessful();
+
+            await page.unroute('**/api/**');
+
+            console.log('Testing concurrent session handling...');
+            const context = await browser.newContext();
+            const newPage = await context.newPage();
+            const secondLoginPage = new LoginPage(newPage);
+
+            try {
+                await secondLoginPage.goto();
+                await secondLoginPage.loginWithDynamicTOTP(
+                    envConfig.credentials.username,
+                    envConfig.credentials.password
+                );
+                await secondLoginPage.verifyLoginSuccessful();
+
+                await page.reload();
+                await page.waitForLoadState('networkidle');
+
+                const sessionStates = await Promise.all([
+                    page.getByText(/session ended|logged out/i).isVisible(),
+                    page.getByText(/another session|concurrent login/i).isVisible(),
+                    page.getByTestId('login-form').isVisible()
+                ]);
+
+                if (!sessionStates.some(state => state)) {
+                    throw new Error('Expected session state change not detected');
+                }
+
+                console.log('Concurrent session handling verified');
+
+            } finally {
+                await context.close();
+            }
+
+        } catch (error) {
+            console.error('Session handling test failed:', error.message);
+            await page.screenshot({ 
+                path: 'session-error.png',
+                fullPage: true 
+            });
+            throw error;
+        }
+    });
+}); // End of test.describe('Login Feature')
