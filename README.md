@@ -64,7 +64,41 @@ npx playwright test --ui
 
 ## Contributing
 
-1. Create a feature branch
+1. Create a feature branch from develop:
+```bash
+git checkout develop
+git pull origin develop
+git checkout -b feature/your-feature-name
+```
 2. Make your changes
-3. Run tests
-4. Submit a pull request
+3. Run tests locally:
+```bash
+npm test
+```
+4. Push your changes:
+```bash
+git add .
+git commit -m "feat: your meaningful commit message"
+git push origin feature/your-feature-name
+```
+5. Create a pull request to merge into develop branch
+6. Once approved and tests pass, your code will be merged
+
+### Branch Protection Rules
+
+The repository has the following branch protection rules:
+- `master`: Production branch
+  - Requires pull request approvals
+  - Must pass CI checks
+  - No direct pushes
+- `develop`: Development branch
+  - Requires pull request approvals
+  - Must pass CI checks
+  - No direct pushes
+
+### Continuous Integration
+
+This project uses GitHub Actions for CI/CD:
+- Runs all tests on push/PR to master or develop
+- Generates and uploads test reports
+- Publishes Allure reports as artifacts
