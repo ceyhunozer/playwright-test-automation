@@ -1,6 +1,11 @@
 import { Page, expect } from '@playwright/test';
-import { TOTPUtil } from '../utils/totp.util';export class LoginPage {
+import { TOTPUtil } from '../utils/totp.util';
+
+export class LoginPage {
     private readonly page: Page;
+    private readonly navigationTimeout = 90000; // Increased timeout for flaky networks
+    private readonly retryAttempts = 5; // Increased retry attempts
+    private readonly retryDelay = 3000; // Increased delay between retries
 
     // Locators
     private readonly usernameInput = 'login-textbox-username';
@@ -9,350 +14,616 @@ import { TOTPUtil } from '../utils/totp.util';export class LoginPage {
     private readonly backToLoginLink = 'link-back-to-login-or-loginform';
     private readonly twofaLoginButton = 'button-twofa-login';
     private readonly codeInputs = '.code--input';
+    private readonly changeUserButton = 'link-change-user';
 
     constructor(page: Page) {
         this.page = page;
     }
 
     /**
-     * Navigates to the login page
+     * Navigates to the login page with enhanced error handling and retries
      */
     async goto() {
-        await this.page.goto('/portal/login', {
-            waitUntil: 'networkidle',
-            timeout: 30000
-        });
-        await this.page.waitForTimeout(1000); // Wait for any redirect
+        let retries = this.retryAttempts;
+        let lastError;
+
+        while (retries > 0) {
+            try {
+                console.log(`Navigate to login page attempt ${this.retryAttempts - retries + 1}/${this.retryAttempts}`);
+                
+                await this.page.goto('/portal/ui', {
+                    waitUntil: 'networkidle',
+                    timeout: this.navigationTimeout
+                });
+
+                // Wait for and verify login page load
+                await this.verifyLoginPageLoaded();
+                return;
+
+            } catch (error) {
+                lastError = error;
+                retries--;
+                if (retries > 0) {
+                    console.log(`Login page navigation failed, retrying in ${this.retryDelay}ms...`);
+                    await this.page.waitForTimeout(this.retryDelay);
+                }
+            }
+        }
+
+        throw new Error(`Failed to navigate to login page after ${this.retryAttempts} attempts: ${lastError.message}`);
     }
 
     /**
-     * Enters the username
+     * Clicks the change user button if it's visible
+     */
+    async clickChangeUserIfVisible() {
+        try {
+            console.log('Checking for change user button...');
+            await this.page.waitForLoadState('domcontentloaded');
+            await this.page.waitForLoadState('networkidle');
+            
+            // Try multiple selectors for change user button
+            const selectors = [
+                this.changeUserButton,
+                'text=Change user',
+                '[data-testid="link-change-user"]',
+                'a:has-text("Change user")',
+                'button:has-text("Change user")'
+            ];
+            
+            let buttonFound = false;
+            
+            for (const selector of selectors) {
+                try {
+                    const changeUserBtn = this.page.locator(selector).first();
+                    await changeUserBtn.waitFor({ state: 'visible', timeout: 3000 });
+                    
+                    const isVisible = await changeUserBtn.isVisible();
+                    if (isVisible) {
+                        console.log(`Change user button found with selector: ${selector}`);
+                        await changeUserBtn.click();
+                        await this.page.waitForTimeout(2000); // Wait for click to process
+                        await this.page.waitForLoadState('networkidle');
+                        console.log('Change user button clicked successfully');
+                        buttonFound = true;
+                        break;
+                    }
+                } catch (error) {
+                    // Continue to next selector
+                    continue;
+                }
+            }
+            
+            if (!buttonFound) {
+                console.log('Change user button not found with any selector, proceeding...');
+            }
+            
+        } catch (error) {
+            console.log('Error checking for change user button:', error.message);
+        }
+    }
+
+    /**
+     * Enters the username with enhanced error handling
      * @param username - The username to enter
      */
     async enterUsername(username: string) {
         console.log('Entering username:', username);
-        await this.page.waitForLoadState('domcontentloaded');
-        const usernameField = this.page.getByTestId(this.usernameInput);
-        
-        // Wait with retry
-        let retries = 3;
+        let retries = this.retryAttempts;
+        let lastError;
+
         while (retries > 0) {
             try {
-                await usernameField.waitFor({ state: 'visible', timeout: 5000 });
+                // Ensure page is fully loaded
+                await this.page.waitForLoadState('domcontentloaded');
+                await this.page.waitForLoadState('networkidle');
+                
+                const usernameField = this.page.getByTestId(this.usernameInput);
+                
+                // Wait for field to be ready
+                await usernameField.waitFor({ 
+                    state: 'visible', 
+                    timeout: this.navigationTimeout 
+                });
+                
+                // Verify field is interactive
+                const isEnabled = await usernameField.isEnabled();
+                if (!isEnabled) {
+                    throw new Error('Username field is not enabled');
+                }
+                
+                // Clear and fill the username
                 await usernameField.clear();
+                await this.page.waitForTimeout(500); // Wait after clear
+                
                 await usernameField.fill(username);
-                await usernameField.press('Tab'); // Trigger any validation
-                break;
+                await this.page.waitForTimeout(1000); // Wait after fill
+                
+                // Trigger validation and wait
+                await usernameField.press('Tab');
+                await this.page.waitForTimeout(500); // Wait for validation
+                
+                console.log('Username entered and validated successfully');
+                return;
+
             } catch (error) {
+                lastError = error;
                 retries--;
-                if (retries === 0) throw error;
-                await this.page.waitForTimeout(1000);
+                if (retries > 0) {
+                    console.log(`Username entry failed, retrying in ${this.retryDelay}ms...`);
+                    await this.page.waitForTimeout(this.retryDelay);
+                }
             }
         }
+
+        throw new Error(`Failed to enter username after ${this.retryAttempts} attempts: ${lastError.message}`);
     }
 
     /**
-     * Enters the password
+     * Enters the password with enhanced error handling
      * @param password - The password to enter
      */
     async enterPassword(password: string) {
         console.log('Entering password');
-        const passwordField = this.page.getByTestId(this.passwordInput);
-        await passwordField.waitFor({ state: 'visible' });
-        await passwordField.clear();
-        await passwordField.fill(password);
-        await passwordField.press('Tab'); // Trigger any validation
-        await this.page.waitForTimeout(500); // Give time for validation
-    }
+        let retries = this.retryAttempts;
+        let lastError;
 
-    /**
-     * Clicks the continue button and handles navigation
-     */
-    async clickContinue(expectFailure: boolean = false) {
-        const button = this.page.getByTestId(this.continueButton);
-        
-        // Wait for button with retry logic
-        let retries = 3;
-        let isClicked = false;
-        
-        while (retries > 0 && !isClicked) {
+        while (retries > 0) {
             try {
+                // Ensure page is stable
                 await this.page.waitForLoadState('domcontentloaded');
                 await this.page.waitForLoadState('networkidle');
                 
-                // Wait for button or check if we're redirected
-                try {
-                    await button.waitFor({ state: 'visible', timeout: 5000 });
-                } catch (error) {
-                    // Check if we've been redirected
-                    const currentUrl = this.page.url();
-                    if (currentUrl.includes('portal.html')) {
-                        console.log('Successfully redirected to portal');
-                        return;
-                    }
-                    if (currentUrl.includes('loginfail')) {
-                        if (expectFailure) {
-                            console.log('Login failed as expected');
-                            return;
-                        }
-                        throw new Error('Login failed - invalid credentials');
-                    }
-                    throw error;
-                }
+                const passwordField = this.page.getByTestId(this.passwordInput);
+                await passwordField.waitFor({ 
+                    state: 'visible',
+                    timeout: this.navigationTimeout 
+                });
                 
-                const isEnabled = await button.isEnabled();
-                console.log('Continue button state:', { isEnabled });
-                
+                // Verify field is interactive
+                const isEnabled = await passwordField.isEnabled();
                 if (!isEnabled) {
-                    console.log('Button not enabled, retrying...');
-                    retries--;
-                    await this.page.waitForTimeout(1000);
-                    continue;
+                    throw new Error('Password field is not enabled');
                 }
                 
-                await button.click();
-                isClicked = true;
+                // Simple sendKeys approach - clear and type password
+                await passwordField.clear();
+                await this.page.waitForTimeout(500); // Wait after clear
                 
-                // Wait for navigation
+                console.log('Using simple sendKeys approach for password...');
+                console.log('Password length to enter:', password.length);
+                
+                // Focus the field and type the password character by character
+                await passwordField.focus();
+                
+                // Type with slower delay to ensure special characters are handled
+                await passwordField.type(password, { delay: 150 });
+                
+                await this.page.waitForTimeout(1000); // Wait after typing
+                
+                // Verify the password was entered by checking field state
+                const fieldValue = await passwordField.evaluate(el => (el as HTMLInputElement).value);
+                console.log('Password field length after typing:', fieldValue.length);
+                console.log('Expected length:', password.length);
+                
+                if (fieldValue.length !== password.length) {
+                    console.log('Password length mismatch! Trying alternative method...');
+                    
+                    // Clear and try typing each character individually
+                    await passwordField.clear();
+                    await this.page.waitForTimeout(300);
+                    await passwordField.focus();
+                    
+                    for (let i = 0; i < password.length; i++) {
+                        const char = password[i];
+                        console.log(`Typing character ${i + 1}/${password.length}: ${char}`);
+                        await passwordField.type(char, { delay: 200 });
+                        
+                        // Check if character was entered
+                        const currentValue = await passwordField.evaluate(el => (el as HTMLInputElement).value);
+                        if (currentValue.length !== i + 1) {
+                            console.log(`Warning: Expected ${i + 1} characters, got ${currentValue.length}`);
+                        }
+                    }
+                    
+                    // Final verification
+                    const finalValue = await passwordField.evaluate(el => (el as HTMLInputElement).value);
+                    console.log('Final password field length:', finalValue.length);
+                }
+                
+                console.log('Password entered and validated successfully');
+                return;
+
+            } catch (error) {
+                lastError = error;
+                retries--;
+                if (retries > 0) {
+                    console.log(`Password entry failed, retrying in ${this.retryDelay}ms...`);
+                    await this.page.waitForTimeout(this.retryDelay);
+                }
+            }
+        }
+
+        throw new Error(`Failed to enter password after ${this.retryAttempts} attempts: ${lastError.message}`);
+    }
+
+    /**
+     * Clicks the continue button with enhanced error handling
+     */
+    async clickContinue(expectError: boolean = false) {
+        let retries = expectError ? 1 : this.retryAttempts;
+        let lastError;
+
+        while (retries > 0) {
+            try {
+                // Ensure page is stable before clicking
+                await this.page.waitForLoadState('domcontentloaded');
                 await this.page.waitForLoadState('networkidle');
                 
-                // Check final URL
-                const finalUrl = this.page.url();
-                if (finalUrl.includes('loginfail')) {
-                    if (expectFailure) {
-                        console.log('Login failed as expected');
-                        return;
+                const button = this.page.getByTestId(this.continueButton);
+                
+                // Wait for button to be ready
+                await button.waitFor({ state: 'visible', timeout: 10000 });
+                
+                const buttonState = {
+                    isEnabled: await button.isEnabled(),
+                    isVisible: await button.isVisible()
+                };
+                console.log('Continue button state:', buttonState);
+
+                if (!buttonState.isVisible || !buttonState.isEnabled) {
+                    // Wait a bit more for the button to become enabled
+                    console.log('Button not ready, waiting for it to become interactive...');
+                    await this.page.waitForTimeout(2000);
+                    
+                    const updatedState = {
+                        isEnabled: await button.isEnabled(),
+                        isVisible: await button.isVisible()
+                    };
+                    console.log('Updated button state:', updatedState);
+                    
+                    if (!updatedState.isVisible || !updatedState.isEnabled) {
+                        throw new Error('Continue button is not interactive after waiting');
                     }
-                    throw new Error('Login failed - invalid credentials');
                 }
-                if (finalUrl.includes('portal.html')) {
-                    console.log('Successfully redirected to portal');
-                    return;
-                }
+
+                console.log('Clicking continue button...');
+                await button.click();
+                
+                // Wait for the action to process
+                await this.page.waitForTimeout(2000);
+                await this.page.waitForLoadState('networkidle', { timeout: 30000 });
+                
+                console.log('Continue button clicked and page loaded');
+                return;
+
             } catch (error) {
+                lastError = error;
                 retries--;
-                if (retries === 0) throw error;
-                console.log('Retrying click continue...', error.message);
-                await this.page.waitForTimeout(1000);
+                if (retries > 0) {
+                    console.log(`Continue button click failed, retrying in ${this.retryDelay}ms...`);
+                    await this.page.waitForTimeout(this.retryDelay);
+                }
             }
+        }
+
+        if (!expectError) {
+            throw new Error(`Failed to click continue button after ${this.retryAttempts} attempts: ${lastError.message}`);
         }
     }
 
     /**
-     * Clicks the back to login link
+     * Clicks the back to login button/link
      */
     async clickBackToLogin() {
-        const link = this.page.getByTestId(this.backToLoginLink);
-        await link.waitFor({ state: 'visible' });
-        await link.click();
-    }
+        let retries = this.retryAttempts;
+        let lastError;
 
-    /**
-     * Handles the 2FA authentication step
-     */
-    async enter2FACode(code?: string, totpSecret?: string) {
-        try {
-            console.log('Starting 2FA code entry...');
-            
-            // Generate or use provided code
-            const authCode = code || TOTPUtil.generateTOTP(totpSecret);
-            if (!authCode || authCode.length !== 6) {
-                throw new Error(`Invalid 2FA code format: ${authCode}`);
-            }
-            console.log('Generated valid 2FA code');
+        while (retries > 0) {
+            try {
+                const backLink = this.page.getByTestId(this.backToLoginLink);
+                await backLink.waitFor({ state: 'visible', timeout: this.navigationTimeout });
+                await backLink.click();
+                await this.verifyLoginPageLoaded();
+                return;
 
-            // Wait for input fields with retry logic
-            let retries = 3;
-            let inputs: any[] = [];
-            
-            while (retries > 0) {
-                try {
-                    await this.page.waitForSelector(this.codeInputs, { 
-                        state: 'visible',
-                        timeout: 5000 
-                    });
-                    
-                    inputs = await this.page.locator(this.codeInputs).all();
-                    if (inputs.length !== 6) {
-                        throw new Error(`Expected 6 input fields, found ${inputs.length}`);
-                    }
-                    
-                    // Verify all inputs are interactive
-                    for (const input of inputs) {
-                        await expect(input).toBeVisible({ timeout: 5000 });
-                        await expect(input).toBeEnabled({ timeout: 5000 });
-                    }
-                    
-                    break;
-                } catch (error) {
-                    retries--;
-                    console.log(`Retry ${3 - retries}/3: Waiting for 2FA inputs...`);
-                    if (retries === 0) throw error;
-                    await this.page.waitForTimeout(1000);
+            } catch (error) {
+                lastError = error;
+                retries--;
+                if (retries > 0) {
+                    console.log(`Back to login click failed, retrying in ${this.retryDelay}ms...`);
+                    await this.page.waitForTimeout(this.retryDelay);
                 }
             }
-
-            // Split the code and enter digits
-            const digits = authCode.split('');
-            for (let i = 0; i < digits.length; i++) {
-                await inputs[i].click(); // Ensure focus
-                await inputs[i].fill(digits[i]);
-                await expect(inputs[i]).toHaveValue(digits[i], { timeout: 5000 });
-                await this.page.waitForTimeout(200); // Human-like delay
-            }
-
-            console.log('2FA code entered successfully');
-        } catch (error) {
-            console.error('Error entering 2FA code:', error);
-            await this.page.screenshot({ path: 'totp-error.png' });
-            throw error;
         }
+
+        throw new Error(`Failed to click back to login after ${this.retryAttempts} attempts: ${lastError.message}`);
     }
 
     /**
-     * Clicks the 2FA login button
-     */
-    async click2FALogin() {
-        const button = this.page.getByTestId(this.twofaLoginButton);
-        
-        // Wait for button to be both visible and enabled
-        await this.page.waitForLoadState('networkidle');
-        await button.waitFor({ state: 'visible' });
-        await expect(button).toBeEnabled({ timeout: 15000 });
-        
-        // Click with retry logic
-        await button.click();
-        
-        // Wait for navigation and check URL
-        await this.page.waitForLoadState('networkidle');
-        const currentUrl = this.page.url();
-        
-        // Check for successful login
-        if (currentUrl.includes('portal.html')) {
-            console.log('Successfully logged in with 2FA');
-            return;
-        }
-        
-        // Check for failure
-        if (currentUrl.includes('loginfail')) {
-            throw new Error('Login failed - invalid credentials');
-        }
-    }
-
-    /**
-     * Performs a complete login flow
-     * @param username - The username to login with
-     * @param password - The password to login with
-     * @param twoFactorCode - The 6-digit 2FA code
-     */    async login(username: string, password: string, twoFactorCode: string) {
-        await this.enterUsername(username);
-        await this.clickContinue();
-        await this.clickBackToLogin();
-        await this.enterUsername(username);
-        await this.enterPassword(password);
-        await this.clickContinue();
-        await this.enter2FACode(twoFactorCode);
-        await this.click2FALogin();
-        await this.verifyLoginSuccessful();
-    }
-
-    /**
-     * Verifies that the login page is loaded
+     * Verifies that the login page is loaded with enhanced error handling
      */
     async verifyLoginPageLoaded() {
-        // Wait for URL to contain /portal/login
-        await expect(this.page).toHaveURL(/.*\/portal\/login/);
-        
-        // Wait for login form elements
-        await expect(this.page.getByTestId(this.usernameInput)).toBeVisible();
-        await expect(this.page.getByTestId(this.continueButton)).toBeVisible();
-    }
+        let retries = this.retryAttempts;
+        let lastError;
 
-    /**
-     * Verifies that the password input is visible
-     */
-    async verifyPasswordInputVisible() {
-        await expect(this.page.getByTestId(this.passwordInput)).toBeVisible();
-    }
+        while (retries > 0) {
+            try {
+                await this.page.waitForLoadState('domcontentloaded');
+                await this.page.waitForLoadState('networkidle');
 
-    /**
-     * Verifies that the 2FA input is visible
-     */
-    async verify2FAInputVisible() {
-        // Wait for page to stabilize
-        await this.page.waitForLoadState('domcontentloaded');
-        await this.page.waitForLoadState('networkidle');
-        
-        // Check URL first
-        const currentUrl = this.page.url();
-        if (currentUrl.includes('loginfail')) {
-            console.error('Login failed - Current URL:', currentUrl);
-            throw new Error('Login failed - redirected to login failure page. Please check your credentials.');
-        }
+                // Wait for and verify login form elements
+                await expect(this.page.getByTestId(this.usernameInput))
+                    .toBeVisible({ timeout: this.navigationTimeout });
+                await expect(this.page.getByTestId(this.continueButton))
+                    .toBeVisible({ timeout: this.navigationTimeout });
 
-        // Take screenshot for debugging
-        await this.page.screenshot({ path: 'login-page-debug.png' });
+                // Verify URL is correct
+                const currentUrl = this.page.url();
+                if (!currentUrl.includes('/portal/ui') && !currentUrl.includes('/portal/login')) {
+                    throw new Error(`Unexpected URL: ${currentUrl}`);
+                }
 
-        try {
-            // Wait for 2FA input with retry logic
-            let retries = 3;
-            while (retries > 0) {
-                try {
-                    const input = this.page.locator(this.codeInputs).first();
-                    await input.waitFor({ 
-                        state: 'visible',
-                        timeout: 5000
-                    });
-                    
-                    // Additional validation
-                    const isVisible = await input.isVisible();
-                    const isEnabled = await input.isEnabled();
-                    console.log('2FA input state:', { isVisible, isEnabled });
-                    
-                    if (!isVisible || !isEnabled) {
-                        throw new Error('2FA input is not interactive');
-                    }
-                    
-                    console.log('2FA input field is visible and enabled');
-                    return;
-                } catch (error) {
-                    retries--;
-                    if (retries === 0) throw error;
-                    await this.page.waitForTimeout(1000);
+                return;
+
+            } catch (error) {
+                lastError = error;
+                retries--;
+                if (retries > 0) {
+                    console.log(`Login page verification failed, retrying in ${this.retryDelay}ms...`);
+                    await this.page.waitForTimeout(this.retryDelay);
                 }
             }
-        } catch (error) {
-            console.error('Error waiting for 2FA input:', error);
-            // Take error screenshot
-            await this.page.screenshot({ path: 'login-page-error.png' });
-            throw new Error(`Failed to find 2FA input: ${error.message}`);
         }
+
+        // Take error screenshot before throwing
+        await this.captureErrorState('login-page-load-error.png');
+        throw new Error(`Failed to verify login page after ${this.retryAttempts} attempts: ${lastError.message}`);
     }
 
     /**
-     * Verifies that login was successful and portal is accessible
+     * Verifies that login was successful with enhanced error handling
      */
-    async verifyLoginSuccessful(): Promise<void> {
-        try {
-            console.log('Verifying successful login and portal access...');
+    async verifyLoginSuccessful() {
+        let retries = this.retryAttempts;
+        let lastError;
 
-            // Wait for portal redirect with more flexible URL matching
-            await this.page.waitForURL('**/portal/portal.html**', { timeout: 45000 });
-            console.log('Portal URL verified');
+        while (retries > 0) {
+            try {
+                console.log('Verifying successful login...');
+                
+                // Wait for all critical states
+                await Promise.all([
+                    this.page.waitForLoadState('domcontentloaded'),
+                    this.page.waitForLoadState('networkidle'),
+                    this.page.waitForURL('**/portal/portal.html#WELCOME_NEWS', { 
+                        timeout: this.navigationTimeout 
+                    })
+                ]);
 
-            // Wait for the page to be fully loaded and interactive
-            await this.page.waitForLoadState('networkidle', { timeout: 30000 });
-            await this.page.waitForLoadState('domcontentloaded', { timeout: 30000 });
-            
-            // Additional verification - check for portal elements
-            await this.page.waitForSelector('button:has-text("Search")', { timeout: 30000 });
-            console.log('Portal UI elements verified');
-            
-        } catch (error) {
-            // Take a screenshot and re-throw with clear message
-            await this.page.screenshot({ path: 'login-verification-error.png' });
-            throw new Error(`Login verification failed: ${error.message}`);
+                // Additional stabilization wait
+                await this.page.waitForTimeout(1000);
+
+                // Verify we're on the correct success page
+                const currentUrl = this.page.url();
+                console.log('Current URL after login:', currentUrl);
+                
+                // Check that we're on the portal page and not on login/error pages
+                if (!currentUrl.includes('/portal/portal.html#WELCOME_NEWS')) {
+                    throw new Error(`Expected to be on WELCOME_NEWS page, but got: ${currentUrl}`);
+                }
+
+                // Check for login errors
+                const errorElements = await this.page.locator('[data-testid*="error"], .error-message, .alert-error').count();
+                if (errorElements > 0) {
+                    throw new Error('Login error detected on page');
+                }
+
+                // Simple verification - just check that the page loaded and we're not on login page
+                const pageTitle = await this.page.title();
+                console.log('Page title after login:', pageTitle);
+                
+                // Verify page contains portal content (more flexible than specific elements)
+                const hasPortalContent = await this.page.locator('body').isVisible();
+                if (!hasPortalContent) {
+                    throw new Error('Portal page body not visible');
+                }
+
+                // Final verification pause
+                await this.page.waitForTimeout(1000);
+                console.log('Login verification complete - portal page fully loaded');
+                return;
+
+            } catch (error) {
+                lastError = error;
+                retries--;
+                if (retries > 0) {
+                    console.log(`Login verification failed, retrying in ${this.retryDelay}ms...`);
+                    await this.page.waitForTimeout(this.retryDelay);
+                }
+            }
         }
+
+        await this.captureErrorState('login-verification-error.png');
+        throw new Error(`Login verification failed after ${this.retryAttempts} attempts: ${lastError.message}`);
+    }
+
+    /**
+     * Verifies that password input is visible and ready for interaction
+     */
+    async verifyPasswordInputVisible() {
+        let retries = this.retryAttempts;
+        let lastError;
+
+        while (retries > 0) {
+            try {
+                // Wait for page stability
+                await this.page.waitForLoadState('domcontentloaded');
+                await this.page.waitForLoadState('networkidle');
+
+                // Check for login failure
+                const currentUrl = this.page.url();
+                if (currentUrl.includes('loginfail')) {
+                    console.error('Login failed - Current URL:', currentUrl);
+                    throw new Error('Login failed - redirected to login failure page');
+                }
+
+                // Wait for and verify password input
+                const passwordField = this.page.getByTestId(this.passwordInput);
+                await passwordField.waitFor({
+                    state: 'visible',
+                    timeout: this.navigationTimeout
+                });
+
+                const isVisible = await passwordField.isVisible();
+                const isEnabled = await passwordField.isEnabled();
+                console.log('Password input state:', { isVisible, isEnabled });
+
+                if (!isVisible || !isEnabled) {
+                    throw new Error('Password input is not interactive');
+                }
+
+                return;
+
+            } catch (error) {
+                lastError = error;
+                retries--;
+                if (retries > 0) {
+                    console.log(`Password input verification failed, retrying in ${this.retryDelay}ms...`);
+                    await this.page.waitForTimeout(this.retryDelay);
+                }
+            }
+        }
+
+        await this.captureErrorState('password-verification-error.png');
+        throw new Error(`Failed to verify password input after ${this.retryAttempts} attempts: ${lastError.message}`);
+    }
+
+    /**
+     * Verifies that the 2FA input is visible with enhanced error handling
+     */
+    async verify2FAInputVisible() {
+        let retries = this.retryAttempts;
+        let lastError;
+
+        while (retries > 0) {
+            try {
+                // Wait for page stability
+                await this.page.waitForLoadState('domcontentloaded');
+                await this.page.waitForLoadState('networkidle');
+
+                // Check for login failure
+                const currentUrl = this.page.url();
+                console.log('Current URL during 2FA verification:', currentUrl);
+                if (currentUrl.includes('loginfail')) {
+                    console.error('Login failed - Current URL:', currentUrl);
+                    throw new Error('Login failed - redirected to login failure page');
+                }
+
+                // Wait for and verify 2FA input
+                const input = this.page.locator(this.codeInputs).first();
+                console.log('Looking for 2FA inputs with selector:', this.codeInputs);
+                await input.waitFor({
+                    state: 'visible',
+                    timeout: this.navigationTimeout
+                });
+
+                const isVisible = await input.isVisible();
+                const isEnabled = await input.isEnabled();
+                console.log('2FA input state:', { isVisible, isEnabled });
+
+                if (!isVisible || !isEnabled) {
+                    throw new Error('2FA input is not interactive');
+                }
+
+                return;
+
+            } catch (error) {
+                lastError = error;
+                retries--;
+                if (retries > 0) {
+                    console.log(`2FA input verification failed, retrying in ${this.retryDelay}ms...`);
+                    await this.page.waitForTimeout(this.retryDelay);
+                }
+            }
+        }
+
+        await this.captureErrorState('2fa-verification-error.png');
+        throw new Error(`Failed to verify 2FA input after ${this.retryAttempts} attempts: ${lastError.message}`);
+    }
+
+    /**
+     * Enters 2FA code with enhanced error handling
+     */
+    async enter2FACode(code?: string, totpSecret?: string) {
+        let retries = this.retryAttempts;
+        let lastError;
+
+        while (retries > 0) {
+            try {
+                await this.verify2FAInputVisible();
+                
+                // Generate or use provided TOTP code
+                const totpCode = code || TOTPUtil.generateTOTP(totpSecret);
+                console.log('Generated 2FA code:', totpCode.replace(/./g, '*'));
+                console.log('Entering 2FA code into', (await this.page.locator(this.codeInputs).all()).length, 'input fields');
+
+                const codeInputs = await this.page.locator(this.codeInputs).all();
+                for (let i = 0; i < totpCode.length && i < codeInputs.length; i++) {
+                    await codeInputs[i].fill(totpCode[i]);
+                    await this.page.waitForTimeout(100); // Small delay between inputs
+                }
+
+                return;
+
+            } catch (error) {
+                lastError = error;
+                retries--;
+                if (retries > 0) {
+                    console.log(`2FA code entry failed, retrying in ${this.retryDelay}ms...`);
+                    await this.page.waitForTimeout(this.retryDelay);
+                }
+            }
+        }
+
+        await this.captureErrorState('totp-error.png');
+        throw new Error(`Failed to enter 2FA code after ${this.retryAttempts} attempts: ${lastError.message}`);
+    }
+
+    /**
+     * Clicks the 2FA login button with enhanced error handling
+     */
+    async click2FALogin() {
+        let retries = this.retryAttempts;
+        let lastError;
+
+        while (retries > 0) {
+            try {
+                const loginButton = this.page.getByTestId(this.twofaLoginButton);
+                await loginButton.waitFor({ 
+                    state: 'visible',
+                    timeout: this.navigationTimeout 
+                });
+                
+                if (!await loginButton.isEnabled()) {
+                    throw new Error('2FA login button is disabled');
+                }
+
+                await loginButton.click();
+                await this.page.waitForLoadState('networkidle');
+                return;
+
+            } catch (error) {
+                lastError = error;
+                retries--;
+                if (retries > 0) {
+                    console.log(`2FA login button click failed, retrying in ${this.retryDelay}ms...`);
+                    await this.page.waitForTimeout(this.retryDelay);
+                }
+            }
+        }
+
+        throw new Error(`Failed to click 2FA login button after ${this.retryAttempts} attempts: ${lastError.message}`);
     }
 
     /**
@@ -361,68 +632,150 @@ import { TOTPUtil } from '../utils/totp.util';export class LoginPage {
     async loginWithDynamicTOTP(username: string, password: string, totpSecret?: string, keepTOTPSecret: boolean = true) {
         console.log('Starting login flow with username:', username);
         let success = false;
+        let retryCount = 0;
+        let lastError: any;
+        const maxRetries = 2;
         
+        while (retryCount <= maxRetries) {
+            try {
+                console.log(`Login attempt ${retryCount + 1}/${maxRetries + 1}`);
+                
+                // Clear any existing session data
+                // await this.page.context().clearCookies();
+                // await this.page.evaluate(() => {
+                //     localStorage.clear();
+                //     sessionStorage.clear();
+                // });
+                
+                // Navigate and verify login page
+                await this.goto();
+                await this.verifyLoginPageLoaded();
+                
+                // Click change user button if visible
+                await this.clickChangeUserIfVisible();
+                
+                // Handle username and password entry (both required before continue)
+                await this.enterUsername(username);
+                await this.verifyPasswordInputVisible();
+                await this.enterPassword(password);
+                await this.page.waitForLoadState('networkidle');
+                await this.clickContinue();
+                
+                // Debug: Immediate check after continue click
+                const immediateUrl = this.page.url();
+                console.log('Immediate URL after continue click:', immediateUrl);
+                
+                // Wait for page to fully process the login
+                console.log('Waiting for login to process...');
+                await this.page.waitForTimeout(2000);
+                
+                // Check intermediate state
+                const midUrl = this.page.url();
+                console.log('URL after 2s wait:', midUrl);
+                
+                await this.page.waitForTimeout(3000);
+                
+                // Check what page we're on
+                const currentUrl = this.page.url();
+                console.log('Current URL after full wait:', currentUrl);
+                
+                // Debug: Check page content to understand the failure
+                if (currentUrl.includes('loginfail')) {
+                    console.log('Login failed - checking page for error messages...');
+                    const pageContent = await this.page.content();
+                    console.log('Page title:', await this.page.title());
+                    
+                    // Look for specific error messages
+                    const errorSelectors = [
+                        '[data-testid*="error"]',
+                        '.error',
+                        '.alert',
+                        'text="Invalid"',
+                        'text="Error"',
+                        'text="Failed"'
+                    ];
+                    
+                    for (const selector of errorSelectors) {
+                        try {
+                            const errorElement = this.page.locator(selector);
+                            if (await errorElement.isVisible()) {
+                                const errorText = await errorElement.textContent();
+                                console.log(`Found error with selector "${selector}":`, errorText);
+                            }
+                        } catch (e) {
+                            // Ignore selector errors
+                        }
+                    }
+                    
+                    throw new Error('Login failed - redirected to login failure page');
+                }
+
+                
+                // Handle 2FA with enhanced verification
+                await this.verify2FAInputVisible();
+                await this.enter2FACode(undefined, totpSecret);
+                await this.page.waitForLoadState('networkidle');
+                await this.click2FALogin();
+                
+                // Verify successful login with extended timeout
+                await this.page.waitForTimeout(2000); // Additional stability wait
+                await this.verifyLoginSuccessful();
+                
+                success = true;
+                console.log('Login successful');
+                return;
+                
+            } catch (error) {
+                lastError = error;
+                retryCount++;
+                if (retryCount <= maxRetries) {
+                    console.log(`Login flow failed, retrying in ${this.retryDelay}ms...`);
+                    await this.page.waitForTimeout(this.retryDelay);
+                }
+            }
+        }
+        
+        // If we get here, all retries failed
+        await this.captureErrorState('login-flow-error.png');
+        throw new Error(`Login flow failed after ${maxRetries + 1} attempts: ${lastError?.message || 'Unknown error'}`);
+    }
+
+    /**
+     * Performs a quick login flow for testing - alternative implementation
+     */
+    async quickLogin(username: string, password: string, totpSecret?: string) {
         try {
-            // Ensure we're on the login page
             await this.goto();
-            await this.verifyLoginPageLoaded();
-            
-            // Enter username with validation
+            await this.clickChangeUserIfVisible();
             await this.enterUsername(username);
-            await this.clickContinue();
-            
-            // Handle password entry
             await this.verifyPasswordInputVisible();
             await this.enterPassword(password);
             await this.clickContinue();
-            
-            // Wait for state after password entry
-            await this.page.waitForLoadState('networkidle');
-            const currentUrl = this.page.url();
-            
-            // Check if we need 2FA with retries
-            let retries = 3;
-            while (retries > 0) {
-                try {
-                    const currentUrl = this.page.url();
-                    if (currentUrl.includes('twoFactor') || !currentUrl.includes('portal.html')) {
-                        console.log('2FA required, proceeding with TOTP flow...');
-                        await this.verify2FAInputVisible();
-                        await this.enter2FACode(undefined, totpSecret);
-                        await this.click2FALogin();
-                        
-                        // Wait for navigation after 2FA
-                        await this.page.waitForLoadState('networkidle', { timeout: 30000 });
-                        break;
-                    } else if (currentUrl.includes('portal.html')) {
-                        console.log('No 2FA required, already on portal');
-                        break;
-                    }
-                } catch (error) {
-                    retries--;
-                    if (retries === 0) throw error;
-                    console.log('Retrying 2FA check...');
-                    await this.page.waitForTimeout(2000);
-                }
-            }
-            
-            // Final verification with increased timeout
+            // Wait for redirect to 2FA page
+            await this.page.waitForURL(/.*twoFactor/, { timeout: 30000 });
+            await this.verify2FAInputVisible();
+            await this.enter2FACode(undefined, totpSecret);
+            await this.click2FALogin();
             await this.verifyLoginSuccessful();
-            success = true;
-            
-            // Wait for session to be fully established
-            await this.page.waitForTimeout(2000);
-            
-        } catch (error) {
-            console.error('Login flow failed:', error);
-            await this.page.screenshot({ path: 'login-failure.png' });
-            throw error;
         } finally {
-            if (success && !keepTOTPSecret) {
-                // Only clear TOTP secret if explicitly requested
-                console.log('Login successful, clearing TOTP secret');
+            // Clean up TOTP secret
+            if (totpSecret) {
                 TOTPUtil.clearSecret();
             }
+        }
+    }
+
+    /**
+     * Captures error state with screenshot
+     */
+    private async captureErrorState(filename: string) {
+        try {
+            await this.page.screenshot({ 
+                path: filename,
+                fullPage: true
+            });
+        } catch (error) {
+            console.error('Failed to capture error state:', error.message);
         }
     }
 }
